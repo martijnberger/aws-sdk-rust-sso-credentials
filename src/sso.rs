@@ -186,8 +186,8 @@ async fn do_provider_credentials(
     Err(CredentialsError::not_loaded(""))
 }
 
-fn connection_error(e: String) -> CredentialsError {
-    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(e)))
+fn configuration_error(e: &str) -> CredentialsError {
+    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(e.to_owned())))
 }
 
 async fn load_sso_config(profile_name: Option<&str>) -> Result<SSOConfig, CredentialsError> {
@@ -205,39 +205,23 @@ async fn load_sso_config(profile_name: Option<&str>) -> Result<SSOConfig, Creden
     if profile_name.is_some() {
         let profile = profile_set
             .get_profile(profile_name.unwrap())
-            .ok_or_else(|| connection_error("profile_name".to_owned()))?;
+            .ok_or_else(|| configuration_error("profile_name"))?;
         return Ok(SSOConfig {
             sso_account_id: profile
                 .get("sso_account_id")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_account_id".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_account_id"))?
                 .to_owned(),
             sso_role_name: profile
                 .get("sso_role_name")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_role_name".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_role_name"))?
                 .to_owned(),
             sso_region: profile
                 .get("sso_region")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_region".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_region"))?
                 .to_owned(),
             sso_start_url: profile
                 .get("sso_start_url")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_start_url".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_start_url"))?
                 .to_owned(),
             sso_session: profile.get("sso_session").map(|s| s.to_owned()),
         });
@@ -245,35 +229,19 @@ async fn load_sso_config(profile_name: Option<&str>) -> Result<SSOConfig, Creden
         return Ok(SSOConfig {
             sso_account_id: profile_set
                 .get("sso_account_id")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_account_id".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_account_id"))?
                 .to_owned(),
             sso_role_name: profile_set
                 .get("sso_role_name")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_role_name".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_role_name"))?
                 .to_owned(),
             sso_region: profile_set
                 .get("sso_region")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_region".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_region"))?
                 .to_owned(),
             sso_start_url: profile_set
                 .get("sso_start_url")
-                .ok_or_else(|| {
-                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
-                        "sso_start_url".to_owned(),
-                    )))
-                })?
+                .ok_or_else(|| configuration_error("sso_start_url"))?
                 .to_owned(),
             sso_session: profile_set.get("sso_session").map(|s| s.to_owned()),
         });
