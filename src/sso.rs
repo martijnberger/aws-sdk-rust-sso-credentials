@@ -2,9 +2,10 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aws_config::default_provider::credentials::default_provider;
-use aws_config::meta::credentials::{CredentialsProviderChain, LazyCachingCredentialsProvider};
-use aws_types::credentials::{Credentials, CredentialsError, ProvideCredentials};
+use aws_config::profile::profile_file::ProfileFiles;
+use aws_credential_types::{
+    provider::error::CredentialsError, provider::ProvideCredentials, Credentials,
+};
 use aws_types::os_shim_internal::{Env, Fs};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,7 @@ impl std::error::Error for SSOProviderError {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct SSOProviderState {
     sso_config: Option<SSOConfig>,
     cached_token: Option<CachedSSOToken>,
@@ -55,15 +56,6 @@ impl SSOProvider {
     pub fn new() -> Self {
         Default::default()
     }
-
-    pub async fn chained() -> LazyCachingCredentialsProvider {
-        LazyCachingCredentialsProvider::builder()
-            .load(
-                CredentialsProviderChain::first_try("sso", Self::new())
-                    .or_else("default", default_provider().await),
-            )
-            .build()
-    }
 }
 
 impl std::fmt::Debug for SSOProvider {
@@ -73,13 +65,15 @@ impl std::fmt::Debug for SSOProvider {
 }
 
 impl ProvideCredentials for SSOProvider {
-    fn provide_credentials<'a>(&'a self) -> aws_types::credentials::future::ProvideCredentials<'a>
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
     where
         Self: 'a,
     {
         let inner_state = self.state.clone();
 
-        aws_types::credentials::future::ProvideCredentials::new(do_provider_credentials(
+        aws_credential_types::provider::future::ProvideCredentials::new(do_provider_credentials(
             inner_state,
         ))
     }
@@ -97,8 +91,9 @@ struct CachedSSOToken {
 #[derive(Clone, Default, Debug)]
 struct SSOConfig {
     sso_account_id: String,
-    sso_role_name: String,
     sso_region: String,
+    sso_role_name: String,
+    sso_session: Option<String>,
     sso_start_url: String,
 }
 
@@ -123,11 +118,17 @@ async fn do_provider_credentials(
     }
 
     if state.cached_token.is_none() {
-        return Err(CredentialsError::CredentialsNotLoaded);
+        if let Some(session) = &state.sso_config.as_ref().unwrap().sso_session {
+            state.cached_token = load_token_file(session).await;
+        }
+    }
+
+    if state.cached_token.is_none() {
+        return Err(CredentialsError::not_loaded(""));
     }
 
     let config = aws_sdk_sso::Config::builder()
-        .region(aws_sdk_sso::Region::new(Cow::Owned(
+        .region(aws_types::region::Region::new(Cow::Owned(
             state.sso_config.as_ref().unwrap().sso_region.to_owned(),
         )))
         .build();
@@ -141,24 +142,24 @@ async fn do_provider_credentials(
         .access_token(&state.cached_token.as_ref().unwrap().access_token)
         .send()
         .await
-        .map_err(|e| CredentialsError::ProviderError(Box::new(e)))?
+        .map_err(|e| CredentialsError::provider_error(Box::new(e)))?
         .role_credentials
     {
         let expiration = Utc.timestamp(role_credentials.expiration, 0);
 
         return Ok(Credentials::new(
             role_credentials.access_key_id.ok_or_else(|| {
-                CredentialsError::Unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
                     "access_key_id".to_owned(),
                 )))
             })?,
             role_credentials.secret_access_key.ok_or_else(|| {
-                CredentialsError::Unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
                     "secret_access_key".to_owned(),
                 )))
             })?,
             Some(role_credentials.session_token.ok_or_else(|| {
-                CredentialsError::Unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
                     "session_token".to_owned(),
                 )))
             })?),
@@ -167,42 +168,43 @@ async fn do_provider_credentials(
         ));
     }
 
-    Err(CredentialsError::CredentialsNotLoaded)
+    Err(CredentialsError::not_loaded(""))
 }
 
 async fn load_sso_config() -> Result<SSOConfig, CredentialsError> {
     let fs = Fs::default();
     let env = Env::default();
 
-    let profile_set = aws_config::profile::load(&fs, &env)
+    let profile_set = aws_config::profile::load(&fs, &env, &ProfileFiles::default(), None)
         .await
-        .map_err(|_| CredentialsError::CredentialsNotLoaded)?;
+        .map_err(|_| CredentialsError::not_loaded(""))?;
 
     if profile_set.is_empty() {
-        return Err(CredentialsError::CredentialsNotLoaded);
+        return Err(CredentialsError::not_loaded(""));
     }
 
     if let Some(sso_account_id) = profile_set.get("sso_account_id") {
         if let Some(sso_role_name) = profile_set.get("sso_role_name") {
             if let Some(sso_region) = profile_set.get("sso_region") {
                 if let Some(sso_start_url) = profile_set.get("sso_start_url") {
+                    let sso_session = profile_set.get("sso_session");
                     return Ok(SSOConfig {
                         sso_account_id: sso_account_id.to_owned(),
                         sso_role_name: sso_role_name.to_owned(),
                         sso_region: sso_region.to_owned(),
                         sso_start_url: sso_start_url.to_owned(),
+                        sso_session: sso_session.map(|s| s.to_owned()),
                     });
                 }
             }
         }
     }
 
-    Err(CredentialsError::CredentialsNotLoaded)
+    Err(CredentialsError::not_loaded(""))
 }
 
 async fn load_token_file(start_url: &str) -> Option<CachedSSOToken> {
     let mut filename = default_cache_location();
-
     filename.push(get_cache_filename(start_url));
 
     tokio::fs::read_to_string(&filename)
