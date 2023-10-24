@@ -43,6 +43,7 @@ impl std::error::Error for SSOProviderError {
 
 #[derive(Clone, Default, Debug)]
 struct SSOProviderState {
+    profile_name: Option<String>,
     sso_config: Option<SSOConfig>,
     cached_token: Option<CachedSSOToken>,
 }
@@ -55,6 +56,20 @@ pub struct SSOProvider {
 impl SSOProvider {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    pub async fn populate(mut self, profile_name: Option<&str>) -> Self {
+        self.state = Arc::new(Mutex::new(SSOProviderState {
+            profile_name: Some(profile_name.unwrap().to_owned()),
+            sso_config: load_sso_config(profile_name).await.ok(),
+            cached_token: None,
+        }));
+        self
+    }
+
+    pub async fn region(&self) -> String {
+        let state = self.state.lock().await;
+        state.clone().sso_config.unwrap().sso_region.to_owned()
     }
 }
 
@@ -103,7 +118,7 @@ async fn do_provider_credentials(
     let mut state = state.lock().await;
 
     if state.sso_config.is_none() {
-        state.sso_config = Some(load_sso_config().await?);
+        state.sso_config = Some(load_sso_config(state.profile_name.as_deref()).await?);
     }
 
     if let Some(token) = &state.cached_token {
@@ -171,36 +186,98 @@ async fn do_provider_credentials(
     Err(CredentialsError::not_loaded(""))
 }
 
-async fn load_sso_config() -> Result<SSOConfig, CredentialsError> {
+fn connection_error(e: String) -> CredentialsError {
+    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(e)))
+}
+
+async fn load_sso_config(profile_name: Option<&str>) -> Result<SSOConfig, CredentialsError> {
     let fs = Fs::default();
     let env = Env::default();
 
     let profile_set = aws_config::profile::load(&fs, &env, &ProfileFiles::default(), None)
         .await
-        .map_err(|_| CredentialsError::not_loaded(""))?;
+        .map_err(|_| CredentialsError::not_loaded("Cannot load profile"))?;
 
     if profile_set.is_empty() {
-        return Err(CredentialsError::not_loaded(""));
+        return Err(CredentialsError::not_loaded("Got an empty profile set"));
     }
 
-    if let Some(sso_account_id) = profile_set.get("sso_account_id") {
-        if let Some(sso_role_name) = profile_set.get("sso_role_name") {
-            if let Some(sso_region) = profile_set.get("sso_region") {
-                if let Some(sso_start_url) = profile_set.get("sso_start_url") {
-                    let sso_session = profile_set.get("sso_session");
-                    return Ok(SSOConfig {
-                        sso_account_id: sso_account_id.to_owned(),
-                        sso_role_name: sso_role_name.to_owned(),
-                        sso_region: sso_region.to_owned(),
-                        sso_start_url: sso_start_url.to_owned(),
-                        sso_session: sso_session.map(|s| s.to_owned()),
-                    });
-                }
-            }
-        }
+    if profile_name.is_some() {
+        let profile = profile_set
+            .get_profile(profile_name.unwrap())
+            .ok_or_else(|| connection_error("profile_name".to_owned()))?;
+        return Ok(SSOConfig {
+            sso_account_id: profile
+                .get("sso_account_id")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_account_id".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_role_name: profile
+                .get("sso_role_name")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_role_name".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_region: profile
+                .get("sso_region")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_region".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_start_url: profile
+                .get("sso_start_url")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_start_url".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_session: profile.get("sso_session").map(|s| s.to_owned()),
+        });
+    } else {
+        return Ok(SSOConfig {
+            sso_account_id: profile_set
+                .get("sso_account_id")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_account_id".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_role_name: profile_set
+                .get("sso_role_name")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_role_name".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_region: profile_set
+                .get("sso_region")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_region".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_start_url: profile_set
+                .get("sso_start_url")
+                .ok_or_else(|| {
+                    CredentialsError::unhandled(Box::new(SSOProviderError::RequiredConfigMissing(
+                        "sso_start_url".to_owned(),
+                    )))
+                })?
+                .to_owned(),
+            sso_session: profile_set.get("sso_session").map(|s| s.to_owned()),
+        });
     }
-
-    Err(CredentialsError::not_loaded(""))
 }
 
 async fn load_token_file(start_url: &str) -> Option<CachedSSOToken> {
